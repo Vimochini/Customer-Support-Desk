@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support Desk</title>
+<style>
+  :root { --bg: #f4fbf2; --panel: #fff; --ink: #2f3e33; --muted: #6d7f70; --line: #d8ecd4;
+          --green: #4f9d69; --pink: #f5a3c0; --yellow: #ffe9a8; --new: #3f9b5c; --changed: #d9962b; --removed: #e0676f; }
+  body { margin: 0; font: 15px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--ink); }
+  main { max-width: 800px; margin: 0 auto; padding: 18px 16px 40px; }
+  h1 { font-size: 22px; margin: 0 0 14px; color: #2b5e3a; }
+  h2 { font-size: 16px; margin: 26px 0 8px; color: #2b5e3a; }
+  .panel, .box, .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+  .numbers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .numbers .box { text-align: center; }
+  .numbers b { display: block; font-size: 26px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0; }
+  .row input { flex: 1; min-width: 140px; }
+  .stack { display: flex; flex-direction: column; gap: 8px; }
+  input, select, textarea, button { font: inherit; color: var(--ink); padding: 7px 10px; border: 1px solid #c4e2be; border-radius: 9px; background: #fff; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 60px; }
+  button { background: var(--green); color: #fff; border-color: var(--green); cursor: pointer; }
+  button.light { background: #fff; color: var(--green); }
+  .card { border-left: 5px solid var(--pink); margin-bottom: 10px; }
+  .card h3 { font-size: 15px; margin: 0; }
+  .comment { border-top: 1px dashed var(--line); padding: 5px 0; font-size: 14px; }
+  .comment small { color: var(--muted); margin-left: 6px; }
+  .feedback { font-size: 13px; }
+  .bad { color: #c2404a; }
+  .good { color: #2e8a4e; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--removed); }
+  .dot.on { background: var(--new); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Support Desk</h1>
+  <div class="row"><span class="dot" id="dot"></span><span class="muted" id="liveText"></span></div>
+
+  <div class="numbers">
+    <div class="box"><b id="total">-</b><span class="muted">Total</span></div>
+    <div class="box"><b id="open">-</b><span class="muted">Open</span></div>
+    <div class="box"><b id="resolved">-</b><span class="muted">Resolved</span></div>
+  </div>
+
+  <h2>New ticket</h2>
+  <div class="panel stack">
+    <div class="row">
+      <input id="subject" maxlength="120" placeholder="Subject">
+      <input id="customer" placeholder="Customer full name">
+      <select id="priority"><option>Low</option><option selected>Medium</option><option>High</option><option>Critical</option></select>
+    </div>
+    <textarea id="description" placeholder="Description"></textarea>
+    <div class="row"><button id="create">Create</button><span class="feedback" id="createMsg"></span></div>
+  </div>
+
+  <h2>Customers</h2>
+  <div class="panel stack">
+    <div class="row">
+      <input id="first" placeholder="e.g. Linus">
+      <input id="last" placeholder="e.g. Torvalds">
+      <input id="email" placeholder="e.g. linus@example.com">
+      <button id="addPerson">Add</button>
+    </div>
+    <span class="feedback" id="personMsg"></span>
+    <div class="muted" id="people"></div>
+  </div>
+
+  <h2>Tickets</h2>
+  <div class="row"><select id="filter"></select></div>
+  <div id="tickets"></div>
+
+</main>
+
+<script>
+const PRIORITIES = ['Low', 'Medium', 'High', 'Critical'];
+const $ = (id) => document.getElementById(id);
+const drafts = {};  // typed comments, kept across list refreshes
+let people = [], statuses = [], signature = '';
+
+function h(tag, props = {}, ...kids) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...kids);
+  return node;
+}
+
+function say(el, text, ok) {
+  el.textContent = text;
+  el.className = 'feedback ' + (ok ? 'good' : 'bad');
+}
+
+async function post(url, body) {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+// Runs an action, shows its success text or the error
+function run(msg, action, okText) {
+  return async () => {
+    try {
+      await action();
+      say(msg, okText, true);
+    } catch (err) {
+      say(msg, err.message, false);
+    }
+  };
+}
+
+function select(items, value, onchange) {
+  const s = h('select', {}, ...items.map(i => h('option', { value: i, textContent: i })));
+  s.value = value;
+  s.onchange = () => onchange(s.value);
+  return s;
+}
+
+function card(t) {
+  const msg = h('span', { className: 'feedback' });
+  const save = (field) => (value) => run(msg, async () => {
+    await post('/update', { id: t.id, field, value });
+    await loadTickets();
+  }, 'Saved.')();
+
+  const text = h('input', { placeholder: 'Comment', value: drafts[t.id] || '' });
+  text.oninput = () => { drafts[t.id] = text.value; };
+  const sendAs = (side) => run(msg, async () => {
+    await post('/comment', { id: t.id, side, message: text.value });
+    delete drafts[t.id];
+    await loadTickets();
+  }, 'Comment added.');
+
+  return h('div', { className: 'card' },
+    h('div', { className: 'row' }, h('h3', { textContent: `#${t.no} ${t.subject}` }), h('span', { className: 'muted', textContent: t.customer })),
+    h('p', { textContent: t.description }),
+    h('div', { className: 'row' },
+      select(statuses, t.status, (v) => save('status')(v)),
+      select(PRIORITIES, t.priority, (v) => save('priority')(v))),
+    msg,
+    ...t.comments.map(c => h('div', { className: 'comment' },
+      h('b', { textContent: c.who }), ' ', c.message, h('small', { textContent: c.when }))),
+    h('div', { className: 'row' }, text,
+      h('button', { textContent: 'Reply', onclick: sendAs('agent') }),
+      h('button', { className: 'light', textContent: 'Customer message', onclick: sendAs('customer') })));
+}
+
+async function loadTickets() {
+  try {
+    const { tickets } = await (await fetch('/tickets?status=' + $('filter').value)).json();
+    $('tickets').replaceChildren(...(tickets.length ? tickets.map(card)
+      : [h('p', { className: 'muted', textContent: 'No tickets match these choices.' })]));
+  } catch (err) {
+    $('tickets').replaceChildren(h('p', { className: 'bad', textContent: 'Could not load tickets.' }));
+  }
+}
+
+async function loadLive() {
+  try {
+    const d = await (await fetch('/data')).json();
+    $('dot').className = d.connected ? 'dot on' : 'dot';
+    $('liveText').textContent = d.connected ? '' : 'Cannot reach the database right now.';
+    $('total').textContent = d.counts.total;
+    $('open').textContent = d.counts.open;
+    $('resolved').textContent = d.counts.resolved;
+
+    if (!$('filter').options.length) {
+      $('filter').replaceChildren(h('option', { value: '', textContent: 'All statuses' }),
+        ...d.statuses.map(s => h('option', { value: s, textContent: s })));
+    }
+    const next = JSON.stringify([d.people, d.statuses]);
+    if (next !== signature) {
+      signature = next;
+      people = d.people;
+      statuses = d.statuses;
+      $('people').textContent = people.filter(p => p.role === 'customer').map(p => p.name).join(' · ') || 'No customers yet.';
+    }
+  } catch (err) {
+    $('dot').className = 'dot';
+    $('liveText').textContent = 'Cannot reach the page server. Check that it is still running.';
+  }
+}
+
+$('create').onclick = run($('createMsg'), async () => {
+  await post('/ticket', {
+    subject: $('subject').value, description: $('description').value,
+    customer: $('customer').value, priority: $('priority').value,
+  });
+  $('subject').value = ''; $('description').value = ''; $('customer').value = '';
+  await loadTickets();
+}, 'Ticket created.');
+
+$('addPerson').onclick = run($('personMsg'), async () => {
+  await post('/person', { firstName: $('first').value, lastName: $('last').value, email: $('email').value });
+  $('first').value = ''; $('last').value = ''; $('email').value = '';
+  await loadLive();
+}, 'Person added.');
+
+$('filter').onchange = loadTickets;
+
+loadLive().then(loadTickets);
+setInterval(loadLive, 1000);
+setInterval(loadTickets, 15000);
+</script>
+</body>
+</html>
